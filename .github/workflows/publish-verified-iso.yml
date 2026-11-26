@@ -1,0 +1,54 @@
+name: Publish verified Nexium ISO
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful source build run ID
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: nexium-iso-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ inputs.run_id || '45904556454' }}
+    steps:
+      - name: Verify the build and publish its ISO
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]]
+          tag="v1.0-build-$RUN_ID"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx false; then
+            echo 'Release already published'; exit 0
+          fi
+          base="https://github.com/highitsave/nexium-os/releases/download/transfer-$RUN_ID"
+          if ! curl -fsSL "$base/SHA256SUMS" -o SHA256SUMS || ! curl -fsSL "$base/ISO_SIZE_BYTES" -o ISO_SIZE_BYTES; then
+            if [ "$GITHUB_EVENT_NAME" = schedule ]; then echo 'Waiting for staged build'; exit 0; else exit 1; fi
+          fi
+          run=$(curl -fsSL "https://api.github.com/repos/highitsave/nexium-os/actions/runs/$RUN_ID")
+          echo "$run" | jq -e '.name == "Build Nexium ISO" and .head_branch == "main" and .status == "completed" and .conclusion == "success"' >/dev/null
+          file=live-image-amd64.hybrid.iso
+          curl -fL --retry 3 "$base/$file" -o "$file"
+          sha256sum -c SHA256SUMS
+          size=$(stat -c '%s' "$file")
+          expected=$(cat ISO_SIZE_BYTES)
+          test "$size" = "$expected" && test "$size" -gt 0 && test "$size" -lt 1000000000
+          hash=$(sha256sum "$file" | cut -d' ' -f1)
+          notes=$(printf 'XAC OS / Nexium ISO\n\nBuild: https://github.com/highitsave/nexium-os/actions/runs/%s\n\nFilename: %s\n\nSize: %s bytes\n\nSHA-256: %s\n' "$RUN_ID" "$file" "$size" "$hash")
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" "$file" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --title 'XAC OS / Nexium' --notes "$notes"
+          else
+            gh release create "$tag" "$file" --repo "$GITHUB_REPOSITORY" --title 'XAC OS / Nexium' --notes "$notes"
+          fi
+          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag")
+          echo "$release" | jq -e --arg file "$file" --argjson size "$size" '.draft == false and any(.assets[]; .name == $file and .size == $size and .state == "uploaded")' >/dev/null
+          echo "Published $file $size bytes SHA-256 $hash"
