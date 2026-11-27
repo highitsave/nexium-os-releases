@@ -1,7 +1,5 @@
 name: Publish verified Nexium ISO
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
       run_id:
